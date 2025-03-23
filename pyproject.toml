@@ -3,7 +3,7 @@ name = "rinchieeeee-recbole"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "rinchieeeee",email = "hayashi5151@icloud.com"}
+    {name = "rinchieeeee",email = "xxx"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
