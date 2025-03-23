@@ -161,17 +161,18 @@ class PNN_RecSys2024(GeneralRecommender):
         neg_item = interaction[self.NEG_ITEM_ID]
 
         # get your neg items based on your sampling strategy
+        # TODO: 論文では、user 事の interaction 履歴の長さによって、サンプリング数を変更している。が、現状できていない...
         neg_item_seq = neg_item.reshape((self.neg_seq_len, -1))
         neg_item_seq = neg_item_seq.T
         
         user_number = int(len(user) / self.neg_seq_len)
         # user's id
         user = user[0:user_number]
-        # historical transaction record
+        # インタラクションしたアイテム
         history_item = self.history_item_id[user]
         # positive item's id
         pos_item = pos_item[0:user_number]
-        # history_len
+        # インタラクションしたアイテムの数
         history_len = self.history_item_len[user]
         loss = self.forward(user, pos_item, history_item, history_len, neg_item_seq)
         return loss
@@ -183,7 +184,7 @@ class PNN_RecSys2024(GeneralRecommender):
         item = interaction[self.ITEM_ID]
         # user_e, item_e = self.forward(user, item)
         user_e = self.user_emb(user)
-    #     # [user_num, embedding_size]
+        # [user_num, embedding_size]
         item_e = self.item_emb(item)
         return torch.mul(user_e, item_e).sum(dim=1)
 
