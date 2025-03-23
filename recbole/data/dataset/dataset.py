@@ -249,9 +249,14 @@ class Dataset(torch.utils.data.Dataset):
             else:
                 self.logger.info("Stop download.")
                 exit(-1)
-            torch.distributed.barrier()
+            if self.config['use_distributed']:
+                torch.distributed.barrier()
+            else:
+                print("===========Caution==============")
+                print('分散処理は用いられていないです！もし設定したい場合は config file の use_distributed を True にしてください。')
         else:
-            torch.distributed.barrier()
+            if self.config['use_distributed']:
+                torch.distributed.barrier()
 
     def _load_data(self, token, dataset_path):
         """Load features.
