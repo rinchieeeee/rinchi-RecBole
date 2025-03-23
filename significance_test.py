@@ -130,7 +130,7 @@ if __name__ == "__main__":
             continue
         ours = value
         baseline = result_baseline[key]
-        final_result[key] = stats.ttest_rel(ours, baseline, alternative="less")
+        final_result[key] = stats.ttest_rel(ours, baseline, alternative="greater")
 
     with open("significant_test.txt", "w") as f:
         for key, value in final_result.items():
