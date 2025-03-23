@@ -12,7 +12,7 @@ from recbole.utils import InputType
 from recbole.model.loss import BPRLoss
 
 
-class PNN(GeneralRecommender):
+class PNN_RecSys2024(GeneralRecommender):
     input_type = InputType.PAIRWISE
     
     @staticmethod
@@ -20,14 +20,15 @@ class PNN(GeneralRecommender):
         x, y = F.normalize(x, dim=-1), F.normalize(y, dim=-1)
         return (x - y).norm(p=2, dim=1).pow(2).mean()
     @staticmethod
-    def item_loss(x: Tensor):
+    def uniform_loss(x: Tensor):
         x = F.normalize(x, dim=-1)
+        # torch.pdist(, p=2) で, 各 neutral item vector 事の距離を算出しておく. また、対象は　entity (item or user) 次元に沿って平均を取る
         return torch.pdist(x.mean(dim=-2).squeeze(-2), p=2).pow(2).mul(-2).exp().mean().log()
 
     def __init__(self, config, dataset):
-        super(PNN, self).__init__(config, dataset)
+        super(PNN_RecSys2024, self).__init__(config, dataset)
 
-        # Get user history interacted items
+        # ユーザーが過去にインタラクションしたアイテムを取得
         self.history_item_id, _, self.history_item_len = dataset.history_item_matrix(
             max_history_len=config["history_len"]
         )
@@ -38,8 +39,6 @@ class PNN(GeneralRecommender):
         self.embedding_size = config["embedding_size"]
         self.alpha = config["alpha"]
         self.beta = config['beta']
-        self.negative_weight = config["negative_weight"]
-        self.gamma = config["gamma"]
         self.neg_seq_len = config["train_neg_sample_args"]["sample_num"] # TODO: 論文では本来ユーザーの正例の数だけ選ぶようにしている。ただ、一旦は一律でネガティブサンプリング数を増やすことで対応
         self.reg_weight = config["reg_weight"]
         self.history_len = torch.max(self.history_item_len, dim=0)
@@ -48,16 +47,14 @@ class PNN(GeneralRecommender):
         self.user_emb = nn.Embedding(self.n_users, self.embedding_size)
         # item embedding matrix
         self.item_emb = nn.Embedding(self.n_items, self.embedding_size, padding_idx=0)
-        # feature space mapping matrix of user and item
-        self.UI_map = nn.Linear(self.embedding_size, self.embedding_size, bias=False)
         self.W_k = nn.Sequential(
                 nn.Linear(self.embedding_size, self.embedding_size), nn.Tanh()
             )
         # dropout
-        self.lambdat = nn.Linear(self.embedding_size, 1)
+        self.lambda_adapter = nn.Linear(self.embedding_size, 1)
         self.dropout = nn.Dropout(0.1)
         self.require_pow = config["require_pow"]
-        # l2 regularization loss
+        # l2 embedding parameter regularization loss
         self.reg_loss = EmbLoss()
         self.BPR = BPRLoss()
 
@@ -68,25 +65,21 @@ class PNN(GeneralRecommender):
     
 
 
-    def get_UI_aggregation(self, user_e: Tensor, history_positive_item_e: Tensor):
+    def user_pos_item_attention(self, user_e: Tensor, history_positive_item_e: Tensor) -> Tensor:
 
         # [user_num, max_history_len, embedding_size]
         key = self.W_k(history_positive_item_e)
-        attention = torch.matmul(key, user_e.unsqueeze(2)).squeeze(2) # β_{i}^{attr}: 各 positive item に対する attention
-        e_attention = torch.exp(attention)
+        beta_attention = torch.matmul(key, user_e.unsqueeze(2)).squeeze(2) # β_{i}^{attr}: 各 positive item に対する attention
+        alpha_attention = torch.exp(beta_attention)
         mask = (history_positive_item_e.sum(dim=-1) != 0).int()
-        e_attention = e_attention * mask
+        alpha_attention = alpha_attention * mask
         # [user_num, max_history_len]
-        alpha_attention_weight = e_attention / (
-            e_attention.sum(dim=1, keepdim=True) + 1.0e-10
+        alpha_attention_weight = alpha_attention / (
+            alpha_attention.sum(dim=1, keepdim=True) + 1.0e-10
         )
         # [user_num, embedding_size]
-        out = torch.matmul(alpha_attention_weight.unsqueeze(1), history_positive_item_e).squeeze(1) # 式(10)の σ() の中身
-        # Combined vector of user and item sequences
-        out = self.UI_map(out)
-        g = self.gamma
-        UI_aggregation_e = g * user_e + (1 - g) * out
-        return UI_aggregation_e
+        out = torch.matmul(alpha_attention_weight.unsqueeze(1), history_positive_item_e).squeeze(1) # 式(10)の σ() の中身. attention weight をかけて、ベクトルを重み付け
+        return out
 
     def score(self, user_e, item_e):
         score = torch.sum(torch.mul(user_e, item_e), axis=-1)
@@ -108,11 +101,10 @@ class PNN(GeneralRecommender):
 
 
         #semi-supervised learning
-        # 
         
         max_indices = torch.max(neg_cos, dim=1)[1].detach()  # [batch_size] , 評価されていない中で、ユーザーとのコサイン類似度が最大のものを選ぶ
-        UI_aggregation_e = self.get_UI_aggregation(user_e, history_item_e)
-        lambdat = torch.sigmoid(self.lambdat(UI_aggregation_e).mean()) # Eq(10). 実際はミニバッチになっているので、各 [user, history_item] 事に算出される lambda の平均を取る
+        user_pos_item_attention = self.user_pos_item_attention(user_e, history_item_e)
+        lambdat = torch.sigmoid(self.lambda_adapter(user_pos_item_attention).mean()) # Eq(10). 実際はミニバッチになっているので、各 [user, history_item] 事に算出される lambda の平均を取る
         
         # neutral item の選択
         hard_item = torch.gather(neg_item_seq, dim=1, index=max_indices.unsqueeze(-1)).squeeze() # neutral item の選択
@@ -127,28 +119,28 @@ class PNN(GeneralRecommender):
         true_neg_e = self.item_emb(neg_item)
         true_neg_cos = self.score(user_e, true_neg_e)
 
-        pos_dir = torch.sign(pos_item_e.unsqueeze(dim=1))
-        neg_dir = torch.sign(true_neg_e.unsqueeze(dim=1))
+        pos_direction = torch.sign(pos_item_e.unsqueeze(dim=1))
+        neg_direction = torch.sign(true_neg_e.unsqueeze(dim=1))
 
-        pos_random_noise = torch.rand(pos_dir.shape).to(self.device)
-        neg_random_noise = torch.rand(neg_dir.shape).to(self.device) 
+        pos_random_noise = torch.rand(pos_direction.shape).to(self.device)
+        neg_random_noise = torch.rand(neg_direction.shape).to(self.device) 
 
-        pos_random_noise = torch.nn.functional.normalize(pos_random_noise, p=2, dim=-1) * 0.1               
+        pos_random_noise = torch.nn.functional.normalize(pos_random_noise, p=2, dim=-1) * 0.1        
         neg_random_noise = torch.nn.functional.normalize(neg_random_noise, p=2, dim=-1) * 0.1
 
-        noise1 = pos_random_noise + neg_item_seq_e
-        noise2 = neg_random_noise + neg_item_seq_e
+        e_pos_clamp = neg_item_seq_e + pos_random_noise
+        e_neg_clamp = neg_item_seq_e + neg_random_noise
 
 
 
-        l_class = self.Euclidean(noise1 , noise2)
-        l_item = self.item_loss(neg_item_seq_e) / 2
+        loss_constrain = self.Euclidean(e_pos_clamp , e_neg_clamp)
+        loss_uniform = self.uniform_loss(neg_item_seq_e)
 
-        l_rank = self.BPR(pos_cos,neg_cos.mean(dim=-1)) + self.BPR(neg_cos.mean(dim=-1),true_neg_cos)
+        loss_rank = self.BPR(pos_cos,neg_cos.mean(dim=-1)) + self.BPR(neg_cos.mean(dim=-1),true_neg_cos)
 
 
         
-        final_loss = lambdat * bpr_loss  + (1-lambdat)*(l_rank + self.alpha * l_class + self.beta * l_item )
+        final_loss = lambdat * bpr_loss  + (1-lambdat)*(loss_rank + self.alpha * loss_constrain + self.beta * loss_uniform)
 
         # l2 regularization loss
         reg_loss = self.reg_loss(
