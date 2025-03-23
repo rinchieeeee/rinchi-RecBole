@@ -1,0 +1,13 @@
+learning_rate: 0.001
+embedding_size: 64
+aggregator: self_attention
+reg_weight: 0.0001
+train_neg_sample_args:
+  sample_num: 5
+# for MovieLens-1M
+alpha: 0.8
+beta: 0.6
+gamma: 0.6
+use_gpu: True
+gpu_id: 0
+worker: 0
